@@ -1,5 +1,6 @@
+package java;
+
 import java.util.ArrayList;
-import java.util.NoSuchElementException;
 
 public class VectorHeap<E extends Comparable<E>> implements PriorityQueue<E> {
     private ArrayList<E> data;
@@ -9,45 +10,23 @@ public class VectorHeap<E extends Comparable<E>> implements PriorityQueue<E> {
     }
 
     @Override
-    public boolean add(E element) {
+    public void add(E element) {
         data.add(element);
         percolateUp(data.size() - 1);
-        return true;
-    }
-
-    @Override
-    public boolean offer(E element) {
-        return add(element);
     }
 
     @Override
     public E remove() {
         if (isEmpty()) {
-            throw new NoSuchElementException("Heap is empty");
-        }
-        return poll();
-    }
-
-    @Override
-    public E poll() {
-        if (isEmpty()) {
             return null;
         }
-        E min = data.get(0);
-        E last = data.remove(data.size() - 1);
+        E minVal = data.get(0);
+        data.set(0, data.get(data.size() - 1));
+        data.remove(data.size() - 1);
         if (!isEmpty()) {
-            data.set(0, last);
             percolateDown(0);
         }
-        return min;
-    }
-
-    @Override
-    public E element() {
-        if (isEmpty()) {
-            throw new NoSuchElementException("Heap is empty");
-        }
-        return peek();
+        return minVal;
     }
 
     @Override
@@ -65,45 +44,35 @@ public class VectorHeap<E extends Comparable<E>> implements PriorityQueue<E> {
         return data.size();
     }
 
-    @Override
-    public void clear() {
-        data.clear();
+    private void percolateUp(int leaf) {
+        int parent = (leaf - 1) / 2;
+        E value = data.get(leaf);
+        while (leaf > 0 && value.compareTo(data.get(parent)) < 0) {
+            data.set(leaf, data.get(parent));
+            leaf = parent;
+            parent = (leaf - 1) / 2;
+        }
+        data.set(leaf, value);
     }
 
-    private void percolateUp(int index) {
-        E x = data.get(index);
-        while (index > 0) {
-            int parentIndex = (index - 1) / 2;
-            E parent = data.get(parentIndex);
-            if (x.compareTo(parent) >= 0) {
+    private void percolateDown(int root) {
+        int heapSize = data.size();
+        E value = data.get(root);
+        
+        while (root < heapSize) {
+            int childPos = 2 * root + 1;
+            if (childPos >= heapSize) {
                 break;
             }
-            data.set(index, parent);
-            index = parentIndex;
-        }
-        data.set(index, x);
-    }
-
-    private void percolateDown(int index) {
-        int size = data.size();
-        E x = data.get(index);
-        while (index < size / 2) {
-            int leftChild = 2 * index + 1;
-            int rightChild = leftChild + 1;
-            int smallestChild = leftChild;
-            
-            if (rightChild < size && 
-                data.get(rightChild).compareTo(data.get(leftChild)) < 0) {
-                smallestChild = rightChild;
+            if (childPos + 1 < heapSize && data.get(childPos + 1).compareTo(data.get(childPos)) < 0) {
+                childPos++;
             }
-            
-            if (data.get(smallestChild).compareTo(x) >= 0) {
+            if (value.compareTo(data.get(childPos)) <= 0) {
                 break;
             }
-            
-            data.set(index, data.get(smallestChild));
-            index = smallestChild;
+            data.set(root, data.get(childPos));
+            root = childPos;
         }
-        data.set(index, x);
+        data.set(root, value);
     }
 }
