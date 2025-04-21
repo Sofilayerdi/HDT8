@@ -1,491 +1,239 @@
 import simpy
 import random
-import statistics
-from dataclasses import dataclass
+import numpy as np
+import matplotlib.pyplot as plt
 from collections import defaultdict
 
 
-random.seed(10)
+random.seed(10) 
+SIM_TIME = 480  
+PATIENT_ARRIVAL_MEAN = 5  
+NUM_NURSES = 3
+NUM_DOCTORS = 4
+NUM_XRAY_MACHINES = 2
+NUM_LAB_TECHNICIANS = 2
+
+NURSE_HOURLY_WAGE = 30  
+DOCTOR_HOURLY_WAGE = 100  
+XRAY_MACHINE_HOURLY_COST = 50  
+LAB_TECH_HOURLY_WAGE = 40 
+
+wait_times_by_priority = defaultdict(list)
+treatment_times_by_priority = defaultdict(list)
+resource_utilization = {
+    'nurses': 0,
+    'doctors': 0,
+    'xray': 0,
+    'lab': 0
+}
 
 class Patient:
-    def __init__(self, patientId, arrivalTime, triageCode):
-        self.id = patientId
-        self.arrivalTime = arrivalTime
-        self.triageCode = triageCode
-        self.priority = ord(triageCode) - ord('A') + 1
-        self.guaranteedPriority = None
-        self.times = {
-            'arrivalTime': arrivalTime,
-            'startTriage': None,
-            'endTriage': None,
-            'startDoctor': None,
-            'endDoctor': None,
-            'startXray': None,
-            'endXray': None,
-            'startLab': None,
-            'endLab': None,
-            'endTime': None
-        }
-        self.exams = {
-            'xray': False,
-            'lab': False
-        }
-
-@dataclass
-class Hospital:
-    numNurses: int
-    numDoctors: int
-    numXrays: int
-    numLabs: int
-    simulationTime: int = 480
-    arrivalInterval: float = 4.0
-
-class EmergencyService:
-    def __init__(self, env, hospital):
+    def __init__(self, env, name, arrival_time):
         self.env = env
-        self.hospital = hospital
+        self.name = name
+        self.arrival_time = arrival_time
+        self.priority = None
+        self.triage_time = None
+        self.doctor_time = None
+        self.xray_time = None
+        self.lab_time = None
+        self.discharge_time = None
+    
+    def calculate_wait_time(self):
+        return self.discharge_time - self.arrival_time
+    
+    def calculate_treatment_time(self):
+        return (self.discharge_time - self.arrival_time) - (self.triage_time - self.arrival_time)
 
-        self.nurses = simpy.Resource(env, hospital.numNurses)
-        self.doctors = simpy.PriorityResource(env, hospital.numDoctors)
-        self.xrays = simpy.PriorityResource(env, hospital.numXrays)
-        self.labs = simpy.PriorityResource(env, hospital.numLabs)
-
-        self.attendedPatients = []
-        self.waitingTimes = []
-        self.patientsByService = {
-            'xray': 0,
-            'lab': 0
-        }
-
-   
-    def attendPatient(self, patient):
-        patient.times['startTriage'] = self.env.now
-        with self.nurses.request() as req:
-            yield req
-            triageTime = random.uniform(5, 15)
-            yield self.env.timeout(triageTime)
-            patient.times['endTriage'] = self.env.now
-
-            if patient.guaranteedPriority is None:
-                patient.priority = random.randint(1, 5)
-            else:
-                patient.priority = patient.guaranteedPriority
-
-        yield self.env.timeout(random.uniform(1, 5))
-
-        patient.times['startDoctor'] = self.env.now
-        with self.doctors.request(priority=patient.priority) as req:
-            yield req
-            doctorTime = random.uniform(15, 45) 
-            yield self.env.timeout(doctorTime)
-            patient.times['endDoctor'] = self.env.now
-
-            needsXray = random.random() < 0.216 
-            needsLab = random.random() < random.uniform(0.04, 0.09) 
-
-            if needsXray:
-                yield self.env.timeout(random.uniform(1, 5))
-
-                patient.times['startXray'] = self.env.now
-                with self.xrays.request(priority=patient.priority) as reqXray:
-                    yield reqXray
-                    xrayTime = random.uniform(15, 30)
-                    yield self.env.timeout(xrayTime)
-                    patient.times['endXray'] = self.env.now
-                    patient.exams['xray'] = True
-                    self.patientsByService['xray'] += 1
-
-                yield self.env.timeout(random.uniform(1, 5))
-
-            if needsLab:
-                yield self.env.timeout(random.uniform(1, 5))
-
-                patient.times['startLab'] = self.env.now
-                with self.labs.request(priority=patient.priority) as reqLab:
-                    yield reqLab
-                    labTime = random.uniform(30, 60) 
-                    yield self.env.timeout(labTime)
-                    patient.times['endLab'] = self.env.now
-                    patient.exams['lab'] = True
-                    self.patientsByService['lab'] += 1
-
-                yield self.env.timeout(random.uniform(1, 5))
-
-            if needsXray or needsLab:
-                yield self.env.timeout(random.uniform(10, 20))
-
-        patient.times['endTime'] = self.env.now
-        totalTime = patient.times['endTime'] - patient.arrivalTime
-        self.attendedPatients.append(patient)
-        self.waitingTimes.append(totalTime)
-
-
-def generatePatients(env, emergencyService):
-    patientId = 0
-    requiredPriorities = list(range(1, 6))
-    injectionTimeLimit = 300
-
+def patient_generator(env, nurses, doctors, xray_machines, lab_technicians):
+    patient_count = 0
     while True:
-        if env.now > 0 and env.now % 60 < 1 and env.now < injectionTimeLimit:
-            existingPriorities = set(p.priority for p in emergencyService.attendedPatients)
-            missingPriorities = [p for p in requiredPriorities if p not in existingPriorities]
+        yield env.timeout(random.expovariate(1.0 / PATIENT_ARRIVAL_MEAN))
+        patient_count += 1
+        name = f"Paciente-{patient_count}"
+        patient = Patient(env, name, env.now)
+        env.process(patient_flow(env, patient, nurses, doctors, xray_machines, lab_technicians))
 
-            if missingPriorities:
-                for priority in missingPriorities:
-                    patient = Patient(patientId, env.now, chr(ord('A') + priority - 1))
-                    patient.guaranteedPriority = priority
-                    env.process(emergencyService.attendPatient(patient))
-                    patientId += 1
-                    yield env.timeout(0.5)
+def patient_flow(env, patient, nurses, doctors, xray_machines, lab_technicians):
+    with nurses.request() as req:
+        start_wait = env.now
+        yield req
+        wait_time = env.now - start_wait
+        resource_utilization['nurses'] += env.now - start_wait
+        
+        yield env.timeout(10)
+        patient.triage_time = env.now
+        
+        patient.priority = random.randint(1, 5)
+    
+    with doctors.request(priority=patient.priority) as req:
+        start_wait = env.now
+        yield req
+        wait_time = env.now - start_wait
+        resource_utilization['doctors'] += env.now - start_wait
+        
+        doctor_time = max(5, 30 - (patient.priority * 3))
+        yield env.timeout(doctor_time)
+        patient.doctor_time = env.now
+    
+    if random.random() < 0.5:
+        with xray_machines.request(priority=patient.priority) as req:
+            start_wait = env.now
+            yield req
+            wait_time = env.now - start_wait
+            resource_utilization['xray'] += env.now - start_wait
+            
+            xray_time = random.uniform(10, 20)
+            yield env.timeout(xray_time)
+            patient.xray_time = env.now
+    
+    if random.random() < 0.5:
+        with lab_technicians.request(priority=patient.priority) as req:
+            start_wait = env.now
+            yield req
+            wait_time = env.now - start_wait
+            resource_utilization['lab'] += env.now - start_wait
+            
+            lab_time = random.uniform(15, 30)
+            yield env.timeout(lab_time)
+            patient.lab_time = env.now
+    
+    patient.discharge_time = env.now
+    total_wait = patient.calculate_wait_time()
+    treatment_time = patient.calculate_treatment_time()
+    
+    wait_times_by_priority[patient.priority].append(total_wait)
+    treatment_times_by_priority[patient.priority].append(treatment_time)
 
-        code = chr(ord('A') + random.randint(0, 4))
-        patient = Patient(patientId, env.now, code)
-        env.process(emergencyService.attendPatient(patient))
-        patientId += 1
-        yield env.timeout(random.uniform(3, 5))
-
-
-def runSimulation(configuration):
+def run_simulation():
     env = simpy.Environment()
-    emergencyService = EmergencyService(env, configuration)
-    env.process(generatePatients(env, emergencyService))
-    env.run(until=configuration.simulationTime)
+    
+    nurses = simpy.Resource(env, capacity=NUM_NURSES)
+    doctors = simpy.PriorityResource(env, capacity=NUM_DOCTORS)
+    xray_machines = simpy.PriorityResource(env, capacity=NUM_XRAY_MACHINES)
+    lab_technicians = simpy.PriorityResource(env, capacity=NUM_LAB_TECHNICIANS)
+    
+    env.process(patient_generator(env, nurses, doctors, xray_machines, lab_technicians))
+    
+    env.run(until=SIM_TIME)
+    
+    return env
 
-    if emergencyService.waitingTimes:
-        averageTime = statistics.mean(emergencyService.waitingTimes)
-        stdDev = statistics.stdev(emergencyService.waitingTimes) if len(emergencyService.waitingTimes) > 1 else 0
-    else:
-        averageTime, stdDev = 0, 0
+def calculate_statistics():
+    avg_wait_times = {}
+    for priority, times in wait_times_by_priority.items():
+        avg_wait = np.mean(times) if times else 0
+        avg_wait_times[priority] = avg_wait
+    
+    avg_treatment_times = {}
+    for priority, times in treatment_times_by_priority.items():
+        avg_treatment = np.mean(times) if times else 0
+        avg_treatment_times[priority] = avg_treatment
+    
+    total_time = SIM_TIME
+    utilization = {
+        'nurses': (resource_utilization['nurses'] / (NUM_NURSES * total_time)) * 100,
+        'doctors': (resource_utilization['doctors'] / (NUM_DOCTORS * total_time)) * 100,
+        'xray': (resource_utilization['xray'] / (NUM_XRAY_MACHINES * total_time)) * 100,
+        'lab': (resource_utilization['lab'] / (NUM_LAB_TECHNICIANS * total_time)) * 100
+    }
+    
+    return avg_wait_times, avg_treatment_times, utilization
 
-    xrayPercentage = (emergencyService.patientsByService['xray'] / len(emergencyService.attendedPatients) * 100) if emergencyService.attendedPatients else 0
-    labPercentage = (emergencyService.patientsByService['lab'] / len(emergencyService.attendedPatients) * 100) if emergencyService.attendedPatients else 0
+def plot_results(avg_wait_times, avg_treatment_times, utilization):
+    priorities = sorted(avg_wait_times.keys())
+    wait_times = [avg_wait_times[p] for p in priorities]
+    
+    plt.figure(figsize=(10, 5))
+    plt.bar(priorities, wait_times, color='skyblue')
+    plt.title('Tiempo promedio de espera por prioridad')
+    plt.xlabel('Prioridad (1 = más urgente)')
+    plt.ylabel('Minutos')
+    plt.xticks(priorities)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.savefig('wait_times_by_priority.png')
+    plt.close()
+    
+    resources = list(utilization.keys())
+    util_values = [utilization[r] for r in resources]
+    
+    plt.figure(figsize=(10, 5))
+    plt.bar(resources, util_values, color='lightgreen')
+    plt.title('Utilización de recursos (%)')
+    plt.ylabel('Porcentaje de utilización')
+    plt.ylim(0, 100)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.savefig('resource_utilization.png')
+    plt.close()
 
+def calculate_costs():
+    nurse_cost = (SIM_TIME / 60) * NUM_NURSES * NURSE_HOURLY_WAGE
+    doctor_cost = (SIM_TIME / 60) * NUM_DOCTORS * DOCTOR_HOURLY_WAGE
+    xray_cost = (SIM_TIME / 60) * NUM_XRAY_MACHINES * XRAY_MACHINE_HOURLY_COST
+    lab_cost = (SIM_TIME / 60) * NUM_LAB_TECHNICIANS * LAB_TECH_HOURLY_WAGE
+    
+    total_cost = nurse_cost + doctor_cost + xray_cost + lab_cost
+    
     return {
-        'configuration': configuration,
-        'attendedPatients': len(emergencyService.attendedPatients),
-        'averageTime': averageTime,
-        'stdDev': stdDev,
-        'byPriority': calculateByPriority(emergencyService.attendedPatients),
-        'xrayPercentage': xrayPercentage,
-        'labPercentage': labPercentage
+        'nurse_cost': nurse_cost,
+        'doctor_cost': doctor_cost,
+        'xray_cost': xray_cost,
+        'lab_cost': lab_cost,
+        'total_cost': total_cost
     }
 
-
-def calculateByPriority(patients):
-    results = defaultdict(lambda: {'cantidad': 0, 'averageTime': 0})
-
-    for p in patients:
-        results[p.priority]['cantidad'] += 1
-        totalTime = p.times['endTime'] - p.arrivalTime
-        results[p.priority]['totalTime'] = results[p.priority].get('totalTime', 0) + totalTime
-
-        for phase in ['triage', 'doctor']:
-            keyStart = 'start' + phase.capitalize()
-            previousKey = 'arrivalTime' if phase == 'triage' else 'endTriage'
-            waitTimePhase = p.times[keyStart] - p.times[previousKey]
-            waitKey = f'wait{phase.capitalize()}Total'
-            results[p.priority][waitKey] = results[p.priority].get(waitKey, 0) + waitTimePhase
-
-    for priority in range(1, 6):
-        if results[priority]['cantidad'] > 0:
-            results[priority]['averageTime'] = (
-                results[priority]['totalTime'] / results[priority]['cantidad']
-            )
-            for phase in ['triage', 'doctor']:
-                waitKey = f'wait{phase.capitalize()}Total'
-                if waitKey in results[priority]:
-                    results[priority][f'wait{phase.capitalize()}Average'] = (
-                        results[priority][waitKey] / results[priority]['cantidad']
-                    )
-
-    return results
-
-def analyzeCosts(results):
-    nurseCost = 30  
-    doctorCost = 95     
-    xrayCost = 175    
-    labCost = 150
-    
-    costAnalysis = []
-    
-    for res in results:
-        config = res['configuration']
-        simulationHours = config.simulationTime / 60
-        
-        personnelCost = (
-            (config.numNurses * nurseCost * simulationHours) +
-            (config.numDoctors * doctorCost * simulationHours)
-        )
-        
-        equipmentCost = (
-            (config.numXrays * xrayCost * simulationHours) +
-            (config.numLabs * labCost * simulationHours)
-        )
-        
-        totalCost = personnelCost + equipmentCost
-        
-        patientsPerHour = res['attendedPatients'] / simulationHours if simulationHours > 0 else 0
-        costPerPatient = totalCost / res['attendedPatients'] if res['attendedPatients'] > 0 else 0
-        costPerPatientPerHour = costPerPatient / simulationHours if simulationHours > 0 else 0
-        
-        resourceUtilization = res['attendedPatients'] / (
-            config.numNurses + config.numDoctors + config.numXrays + config.numLabs
-        )
-        
-        costData = {
-            'config': config,
-            'personnelCost': personnelCost,
-            'equipmentCost': equipmentCost,
-            'totalCost': totalCost,
-            'costPerPatient': costPerPatient,
-            'patientsPerHour': patientsPerHour,
-            'costPerPatientPerHour': costPerPatientPerHour,
-            'resourceUtilization': resourceUtilization,
-            'simulationHours': simulationHours,
-            'attendedPatients': res['attendedPatients'],
-            'averageTime': res['averageTime']
+def generate_report(avg_wait_times, avg_treatment_times, utilization, costs):
+    report_data = {
+        "configuracion": {
+            "duracion_minutos": SIM_TIME,
+            "intervalo_llegada_pacientes": PATIENT_ARRIVAL_MEAN,
+            "recursos": {
+                "enfermeras": NUM_NURSES,
+                "doctores": NUM_DOCTORS,
+                "rayos_x": NUM_XRAY_MACHINES,
+                "tecnicos_lab": NUM_LAB_TECHNICIANS
+            }
+        },
+        "resultados": {
+            "tiempos_espera": {f"prioridad_{p}": f"{t:.1f} minutos" 
+                              for p, t in sorted(avg_wait_times.items())},
+            "tiempos_tratamiento": {f"prioridad_{p}": f"{t:.1f} minutos" 
+                                   for p, t in sorted(avg_treatment_times.items())},
+            "utilizacion_recursos": {k: f"{v:.1f}%" for k, v in utilization.items()}
+        },
+        "costos": {
+            "enfermeras": f"${costs['nurse_cost']:.2f}",
+            "doctores": f"${costs['doctor_cost']:.2f}",
+            "rayos_x": f"${costs['xray_cost']:.2f}",
+            "laboratorio": f"${costs['lab_cost']:.2f}",
+            "total": f"${costs['total_cost']:.2f}"
+        },
+        "metricas_adicionales": {
+            "pacientes_atendidos": sum(len(times) for times in wait_times_by_priority.values()),
+            "tiempo_espera_promedio": f"{np.mean([t for times in wait_times_by_priority.values() for t in times]):.1f} minutos",
+            "tiempo_tratamiento_promedio": f"{np.mean([t for times in treatment_times_by_priority.values() for t in times]):.1f} minutos"
         }
-        
-        costAnalysis.append(costData)
-    
-    return costAnalysis
-
-
-def printCostAnalysis(costAnalysis):
-    
-    print("\n" + "=" * 80)
-    print("ANALISIS DE COSTOS Y EFICIENCIA".center(80))
-    print("=" * 80)
-    
-    print("\nCOMPARACION DE CONFIGURACIONES:")
-    
-    for i, data in enumerate(costAnalysis, 1):
-        print(f"\n--- Configuracion {i} ---")
-        print(f"Pacientes atendidos: {data['attendedPatients']}")
-        print(f"Costo por paciente: {data['costPerPatient']:.2f} GTQ")
-        print(f"Pacientes por hora: {data['patientsPerHour']:.2f}")
-        print(f"Costo por paciente por hora: {data['costPerPatientPerHour']:.2f} GTQ")
-        print(f"Utilizacion de recursos: {data['resourceUtilization']:.2f}")
-        print(f"Tiempo promedio: {data['averageTime']:.2f} min")
-    
-    print("\nDETALLES POR CONFIGURACION:")
-    print("(asumiendo ingreso de GTQ 350 por paciente)")
-    for i, data in enumerate(costAnalysis, 1):
-        config = data['config']
-        print(f"\n--- Configuracion {i} ---")
-        print(f"Recursos: {config.numNurses} enfermeras, {config.numDoctors} doctores, "
-              f"{config.numXrays} rayos X, {config.numLabs} laboratorios")
-        print(f"Tiempo simulacion: {config.simulationTime} min ({data['simulationHours']:.2f} horas)")
-        print(f"Costo personal: GTQ {data['personnelCost']:.2f}")
-        print(f"Costo equipos: GTQ {data['equipmentCost']:.2f}")
-        print(f"Costo total: GTQ {data['totalCost']:.2f}")
-        print(f"Ganancia estimada: GTQ {data['attendedPatients'] * 350 - data['totalCost']:.2f} ")
-
-
-
-def generateDataForGraphs(results, costAnalysis):
-    graphData = {
-        'configLabels': [f"Config {i+1}" for i in range(len(results))],
-        'patientCounts': [r['attendedPatients'] for r in results],
-        'avgTimes': [r['averageTime'] for r in results],
-        'costsPerPatient': [c['costPerPatient'] for c in costAnalysis],
-        'patientsPerHour': [c['patientsPerHour'] for c in costAnalysis],
-        'priorityDistribution': [],
-        'waitTimesByPriority': [],
-        'resourceCosts': []
     }
     
-    for result in results:
-        priorityData = {}
-        for priority in range(1, 6):
-            data = result['byPriority'][priority]
-            priorityData[f"Prioridad {priority}"] = data['cantidad']
-        graphData['priorityDistribution'].append(priorityData)
+    # Guardar datos en formato JSON para fácil procesamiento
+    import json
+    with open('simulation_data.json', 'w') as f:
+        json.dump(report_data, f, indent=4, ensure_ascii=False)
     
-    for result in results:
-        waitTimeData = {}
-        for priority in range(1, 6):
-            data = result['byPriority'][priority]
-            if data['cantidad'] > 0:
-                waitTriage = data.get('waitTriageAverage', 0)
-                waitDoctor = data.get('waitDoctorAverage', 0)
-                waitTimeData[f"Prioridad {priority}"] = {
-                    'triageWait': waitTriage,
-                    'doctorWait': waitDoctor,
-                    'totalTime': data['averageTime']
-                }
-        graphData['waitTimesByPriority'].append(waitTimeData)
+    # También imprimir en consola para visualización inmediata
+    print("=== DATOS DE SIMULACIÓN ===")
+    print(json.dumps(report_data, indent=4, ensure_ascii=False))
     
-    for i, data in enumerate(costAnalysis):
-        config = data['config']
-        graphData['resourceCosts'].append({
-            'nurses': config.numNurses * 30 * data['simulationHours'],
-            'doctors': config.numDoctors * 95 * data['simulationHours'],
-            'xray': config.numXrays * 175 * data['simulationHours'],
-            'lab': config.numLabs * 150 * data['simulationHours']
-        })
-    
-    return graphData
+    return report_data
 
-def main():
-    hospitalConfigurations = [
-        Hospital(numNurses=3, numDoctors=1, numXrays=1, numLabs=1),
-        Hospital(numNurses=4, numDoctors=2, numXrays=1, numLabs=1),
-        Hospital(numNurses=6, numDoctors=3, numXrays=2, numLabs=2),
-        Hospital(numNurses=5, numDoctors=3, numXrays=2, numLabs=1, arrivalInterval=3),
-        Hospital(numNurses=6, numDoctors=3, numXrays=2, numLabs=2, arrivalInterval=3, simulationTime=720),
-    ]
-
-    print("\n" + "=" * 80)
-    print("SIMULACION DE SERVICIOS DE EMERGENCIA".center(80))
-    print("=" * 80)
+if __name__ == "__main__":
+    env = run_simulation()
     
-    print("\nConfiguraciones del Hospital a evaluar:")
-    for i, config in enumerate(hospitalConfigurations, 1):
-        print(f"\nConfiguracion {i}:")
-        print(f"- Enfermeras: {config.numNurses}")
-        print(f"- Doctores: {config.numDoctors}")
-        print(f"- Rayos X: {config.numXrays}")
-        print(f"- Laboratorios: {config.numLabs}")
-        print(f"- Intervalo llegada: {config.arrivalInterval} min")
-        print(f"- Tiempo simulacion: {config.simulationTime} min")
-
-
-    results = []
-    for config in hospitalConfigurations:
-        result = runSimulation(config)
-        results.append(result)
+    avg_wait_times, avg_treatment_times, utilization = calculate_statistics()
     
-
-    print("\n" + "=" * 80)
-    print("RESUMEN GENERAL DE RESULTADOS".center(80))
-    print("=" * 80)
-
-    print("\nCOMPARACION DE RESULTADOS:")
-
-    for i, result in enumerate(results, 1):
-        print(f"\n--- Configuracion {i} ---")
-        print(f"Pacientes atendidos: {result['attendedPatients']}")
-        print(f"Tiempo promedio: {result['averageTime']:.2f} min")
-        print(f"Desviacion estandar: {result['stdDev']:.2f} min")
-        print(f"Porcentaje de rayos X: {result['xrayPercentage']:.2f}%")
-        print(f"Porcentaje de laboratorio: {result['labPercentage']:.2f}%")
+    costs = calculate_costs()
     
+    plot_results(avg_wait_times, avg_treatment_times, utilization)
     
-    # Analisis de costos
-    costAnalysis = analyzeCosts(results)
-    printCostAnalysis(costAnalysis)
-    
-    graphData = generateDataForGraphs(results, costAnalysis)
-    
-    return {
-        'results': results,
-        'costAnalysis': costAnalysis,
-        'graphData': graphData
-    }
-
-
-def generateGraphs(data):
-    import matplotlib.pyplot as plt
-    import numpy as np
-    
-    graphData = data['graphData']
-    results = data['results']
-    costAnalysis = data['costAnalysis']
-    
-    plt.style.use('ggplot')
-    
-    # 1. Grafico principal
-    fig, ax = plt.subplots(figsize=(12, 6))
-    x = np.arange(len(graphData['configLabels']))
-    width = 0.2
-    
-    bar1 = ax.bar(x - width, graphData['patientCounts'], width, label='Pacientes Atendidos')
-    
-    bar2 = ax.bar(x, graphData['avgTimes'], width, label='Tiempo Promedio (min)')
-    
-    bar3 = ax.bar(x + width, [c/10 for c in graphData['costsPerPatient']], width, 
-                  label='Costo por Paciente / 10 (GTQ)')
-    
-    ax.set_xticks(x)
-    ax.set_xticklabels(graphData['configLabels'])
-    ax.set_ylabel('Valores')
-    ax.set_title('Comparativa entre Configuraciones')
-    ax.legend()
-    
-    for bar in [bar1, bar2, bar3]:
-        for rect in bar:
-            height = rect.get_height()
-            ax.annotate(f'{height:.1f}',
-                        xy=(rect.get_x() + rect.get_width() / 2, height),
-                        xytext=(0, 3),
-                        textcoords="offset points",
-                        ha='center', va='bottom', fontsize=8)
-    
-    # 2. Grafico de eficiencia de costos
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    costEfficiency = []
-    for data in costAnalysis:
-        costEfficiency.append({
-            'config': data['config'],
-            'costPerPatient': data['costPerPatient'],
-            'patientsPerHour': data['patientsPerHour']
-        })
-    
-    sortedEfficiency = sorted(costEfficiency, key=lambda x: x['costPerPatient'])
-    
-    configNames = [f"Config {i+1}" for i, _ in enumerate(sortedEfficiency)]
-    costs = [data['costPerPatient'] for data in sortedEfficiency]
-    throughputs = [data['patientsPerHour'] for data in sortedEfficiency]
-    
-    x = np.arange(len(configNames))
-    width = 0.35
-    
-    ax.bar(x - width/2, costs, width, label='Costo por Paciente (GTQ)')
-    ax2 = ax.twinx()
-    ax2.bar(x + width/2, throughputs, width, color='orange', label='Pacientes por Hora')
-    
-    ax.set_xticks(x)
-    ax.set_xticklabels(configNames)
-    ax.set_ylabel('Costo por Paciente (GTQ)')
-    ax2.set_ylabel('Pacientes por Hora')
-    ax.set_title('Eficiencia de Costos por Configuracion')
-    
-    lines1, labels1 = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
-    
-    # 3. Grafico de costos
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    nurseCosts = [data['nurses'] for data in graphData['resourceCosts']]
-    doctorCosts = [data['doctors'] for data in graphData['resourceCosts']]
-    xrayCosts = [data['xray'] for data in graphData['resourceCosts']]
-    labCosts = [data['lab'] for data in graphData['resourceCosts']]
-    
-    bottom = np.zeros(len(graphData['configLabels']))
-    
-    p1 = ax.bar(graphData['configLabels'], nurseCosts, label='Enfermeras')
-    bottom = np.add(bottom, nurseCosts)
-    
-    p2 = ax.bar(graphData['configLabels'], doctorCosts, bottom=bottom, label='Doctores')
-    bottom = np.add(bottom, doctorCosts)
-    
-    p3 = ax.bar(graphData['configLabels'], xrayCosts, bottom=bottom, label='Rayos X')
-    bottom = np.add(bottom, xrayCosts)
-    
-    p4 = ax.bar(graphData['configLabels'], labCosts, bottom=bottom, label='Laboratorios')
-    
-    ax.set_ylabel('Costo (GTQ)')
-    ax.set_title('Desglose de Costos por Configuracion')
-    ax.legend()
-    
-    plt.tight_layout()
-    plt.show()
-    
-    return fig
-
-if __name__ == '__main__':
-    simulationData = main()
-    generateGraphs(simulationData)
+    report = generate_report(avg_wait_times, avg_treatment_times, utilization, costs)
+    print(report)
